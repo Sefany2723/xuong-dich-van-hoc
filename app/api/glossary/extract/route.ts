@@ -116,7 +116,7 @@ QUY TẮC TRÍCH XUẤT CHUẨN:
 ${slicedInput}`;
 
     const {
-      result: interaction,
+      result: extractedPayload,
       keyIndexUsed,
       totalKeys,
       modelUsed,
@@ -125,14 +125,15 @@ ${slicedInput}`;
       totalDurationMs,
     } = await geminiKeyPool.executeWithKeyRotation(
       async (ai, slotInfo) => {
-        return await ai.interactions.create({
+        const interaction = await ai.interactions.create({
           model: slotInfo.activeModel,
           store: false,
           system_instruction: systemPrompt,
           input: prompt,
           generation_config: buildInteractionGenerationConfig(
             resolvedThinkingLevel,
-            { temperature: 0.2 }
+            undefined,
+            slotInfo.activeModel
           ),
           response_format: {
             type: 'object',
@@ -200,6 +201,23 @@ ${slicedInput}`;
             additionalProperties: false,
           },
         });
+
+        const rawOutputText = extractInteractionText(interaction);
+        const parsed = safeParseInteractionJson<{
+          terms?: Array<{
+            sourceTerm: string;
+            targetTerm: string;
+            aliases?: string[];
+            policy?: 'force' | 'prefer' | 'contextual' | 'keep_source';
+            category: string;
+            notes: string;
+          }>;
+        }>(rawOutputText, `GlossaryExtract[${reqId}]`);
+
+        return {
+          rawOutputText,
+          terms: Array.isArray(parsed.terms) ? parsed.terms : [],
+        };
       },
       selectedModel,
       cleanFallbackModel,
@@ -211,19 +229,7 @@ ${slicedInput}`;
       }
     );
 
-    const rawOutputText = extractInteractionText(interaction);
-    const parsed = safeParseInteractionJson<{
-      terms?: Array<{
-        sourceTerm: string;
-        targetTerm: string;
-        aliases?: string[];
-        policy?: 'force' | 'prefer' | 'contextual' | 'keep_source';
-        category: string;
-        notes: string;
-      }>;
-    }>(rawOutputText, `GlossaryExtract[${reqId}]`);
-
-    const terms = parsed.terms || [];
+    const { rawOutputText, terms } = extractedPayload;
     const routeDurationMs = Date.now() - routeStartMs;
 
     const debugTrace: ServerDebugTrace = {

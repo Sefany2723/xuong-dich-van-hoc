@@ -287,11 +287,42 @@ export function mergeServerLogsIntoClient(serverEntries: StructuredLogEntry[]): 
 }
 
 let isSyncingServerLogsPromise: Promise<StructuredLogEntry[]> | null = null;
+let activeLongRunningAiCount = 0;
+let lastServerLogSyncEpochMs = 0;
 
-export async function syncServerLogsFromApi(): Promise<StructuredLogEntry[]> {
+function sleepWithAbort(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (signal && onAbort) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    if (signal) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+export async function syncServerLogsFromApi(force = false): Promise<StructuredLogEntry[]> {
   if (typeof window === 'undefined') return [];
+  const now = Date.now();
+  // Avoid starving the browser's 6-connections-per-origin HTTP/1.1 pool when multiple AI streams are active
+  if (
+    !force &&
+    activeLongRunningAiCount > 0 &&
+    now - lastServerLogSyncEpochMs < 6000
+  ) {
+    return [...clientRingBuffer];
+  }
   if (isSyncingServerLogsPromise) return isSyncingServerLogsPromise;
 
+  lastServerLogSyncEpochMs = now;
   isSyncingServerLogsPromise = (async () => {
     try {
       const res = await fetch('/api/logs', {
@@ -481,10 +512,9 @@ export interface SafeFetchResult<T> {
 
 /**
  * Wraps `fetch()` across the entire frontend with full console logging.
- * Reads `res.text()` first before `JSON.parse()` so non-JSON proxy/gateway errors
- * (such as `"upstream request timeout"`, 502/504 HTML pages, or network resets)
- * are captured in full detail in the Console instead of throwing an opaque
- * `SyntaxError: Unexpected token 'u', "upstream r"... is not valid JSON`.
+ * Reads `res.text()` inside the retryable `try...catch` block so both initial connection errors
+ * and mid-stream drops during `withHeartbeatStream` (`TypeError: Failed to fetch` / chunked encoding reset)
+ * automatically recover via Fresh Pipe retries (`MAX_FRESH_PIPE_RETRIES`) without failing the chapter.
  */
 export async function safeFetchJson<T = Record<string, unknown>>(
   url: string,
@@ -503,129 +533,150 @@ export async function safeFetchJson<T = Record<string, unknown>>(
     url.startsWith('/api/editor/assist') ||
     url.startsWith('/api/glossary/extract');
 
-  const MAX_FRESH_PIPE_RETRIES = isLongRunningAiRoute ? 8 : 0;
+  const MAX_FRESH_PIPE_RETRIES = isLongRunningAiRoute ? 10 : 1;
 
-  for (
-    let freshPipeAttempt = 0;
-    freshPipeAttempt <= MAX_FRESH_PIPE_RETRIES;
-    freshPipeAttempt++
-  ) {
-    const reqId =
-      freshPipeAttempt === 0
-        ? baseReqId
-        : `${baseReqId}_pipe${freshPipeAttempt + 1}`;
-    const startMs = Date.now();
+  if (isLongRunningAiRoute) {
+    activeLongRunningAiCount += 1;
+  }
 
-    const headers = new Headers(init.headers || {});
-    headers.set('X-MHC-Request-Id', reqId);
-    if (isLongRunningAiRoute) {
-      headers.set('X-MHC-Heartbeat', '1');
-    }
-    if (typeof window !== 'undefined' && url.startsWith('/api/')) {
-      try {
-        const localRawKeys =
-          window.localStorage.getItem('mhc_project_api_keys_v1') || '';
-        const encodedKeys = localRawKeys.trim()
-          ? window.btoa(encodeURIComponent(localRawKeys.trim()))
-          : '';
-        headers.set('X-MHC-User-Keys', encodedKeys);
-      } catch {
-        headers.set('X-MHC-User-Keys', '');
-      }
-    }
-
-    if (!options.silentSuccessLog) {
-      logger.info(
-        options.scope,
+  try {
+    for (
+      let freshPipeAttempt = 0;
+      freshPipeAttempt <= MAX_FRESH_PIPE_RETRIES;
+      freshPipeAttempt++
+    ) {
+      const reqId =
         freshPipeAttempt === 0
-          ? `▶ Bắt đầu gọi ${method} ${url} — ${options.label}`
-          : `🔄 [Sợi dây 1 mới #${freshPipeAttempt + 1} • Reset đồng hồ 300s về 0s] Gọi lại ${method} ${url} — ${options.label}`,
-        {
-          reqId,
-          url,
-          method,
-          freshPipeAttempt: freshPipeAttempt + 1,
-          payloadChars: bodySize,
-          ...(options.requestSummary || {}),
-        },
-        reqId
-      );
-    }
+          ? baseReqId
+          : `${baseReqId}_pipe${freshPipeAttempt + 1}`;
+      const startMs = Date.now();
 
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        ...init,
-        headers,
-      });
-    } catch (networkErr: unknown) {
-      const durationMs = Date.now() - startMs;
-      const isAborted =
-        init.signal?.aborted ||
-        (networkErr instanceof Error && networkErr.name === 'AbortError');
+      const headers = new Headers(init.headers || {});
+      headers.set('X-MHC-Request-Id', reqId);
+      if (isLongRunningAiRoute) {
+        headers.set('X-MHC-Heartbeat', '1');
+      }
+      if (typeof window !== 'undefined' && url.startsWith('/api/')) {
+        try {
+          const localRawKeys =
+            window.localStorage.getItem('mhc_project_api_keys_v1') || '';
+          const encodedKeys = localRawKeys.trim()
+            ? window.btoa(encodeURIComponent(localRawKeys.trim()))
+            : '';
+          headers.set('X-MHC-User-Keys', encodedKeys);
+        } catch {
+          headers.set('X-MHC-User-Keys', '');
+        }
+      }
 
-      if (isAborted) {
-        logger.warn(
+      if (!options.silentSuccessLog) {
+        logger.info(
           options.scope,
-          `⏹ Đã chủ động hủy request (AbortSignal) — ${options.label}`,
+          freshPipeAttempt === 0
+            ? `▶ Bắt đầu gọi ${method} ${url} — ${options.label}`
+            : `🔄 [Sợi dây 1 mới #${freshPipeAttempt + 1} • Reset đồng hồ 300s về 0s] Gọi lại ${method} ${url} — ${options.label}`,
+          {
+            reqId,
+            url,
+            method,
+            freshPipeAttempt: freshPipeAttempt + 1,
+            payloadChars: bodySize,
+            ...(options.requestSummary || {}),
+          },
+          reqId
+        );
+      }
+
+      let res: Response;
+      let rawText: string;
+      try {
+        res = await fetch(url, {
+          ...init,
+          headers,
+        });
+        // IMPORTANT: Must await res.text() INSIDE try/catch because withHeartbeatStream
+        // flushes HTTP 200 headers at 0s, so mid-stream proxy/network drops throw "Failed to fetch" here!
+        rawText = await res.text();
+      } catch (networkErr: unknown) {
+        const durationMs = Date.now() - startMs;
+        const isAborted =
+          init.signal?.aborted ||
+          (networkErr instanceof Error && networkErr.name === 'AbortError');
+
+        if (isAborted) {
+          logger.warn(
+            options.scope,
+            `⏹ Đã chủ động hủy request (AbortSignal) — ${options.label}`,
+            {
+              reqId,
+              url,
+              durationMs,
+              ...(options.requestSummary || {}),
+            },
+            reqId,
+            durationMs
+          );
+          throw networkErr;
+        }
+
+        const errMsg =
+          networkErr instanceof Error ? networkErr.message : String(networkErr);
+
+        if (freshPipeAttempt < MAX_FRESH_PIPE_RETRIES) {
+          const backoffMs = Math.min(4000, 800 + freshPipeAttempt * 600);
+          logger.warn(
+            options.scope,
+            `🔄 [Làm mới Sợi dây 1 sau lỗi mạng/đứt stream (${errMsg}) ở ${(durationMs / 1000).toFixed(1)}s] Đợi ${(backoffMs / 1000).toFixed(1)}s rồi tự động mở kết nối mới (Lần #${freshPipeAttempt + 2}/${MAX_FRESH_PIPE_RETRIES + 1}) — ${options.label}`,
+            {
+              reqId,
+              url,
+              durationMs,
+              backoffMs,
+              errorMessage: errMsg,
+              nextPipeAttempt: freshPipeAttempt + 2,
+            },
+            reqId,
+            durationMs
+          );
+          await sleepWithAbort(backoffMs, init.signal);
+          if (init.signal?.aborted) {
+            const abortErr = new Error('Đã hủy yêu cầu từ phía trình duyệt (AbortSignal).');
+            abortErr.name = 'AbortError';
+            throw abortErr;
+          }
+          continue;
+        }
+
+        logger.error(
+          options.scope,
+          `✖ Lỗi kết nối mạng (Network Fetch Failed) sau ${freshPipeAttempt + 1} lần thử tại ${url} — ${options.label}`,
           {
             reqId,
             url,
             durationMs,
+            attemptsTried: freshPipeAttempt + 1,
+            errorName: networkErr instanceof Error ? networkErr.name : 'Unknown',
+            errorMessage: errMsg,
             ...(options.requestSummary || {}),
           },
           reqId,
           durationMs
         );
-        throw networkErr;
+        const descriptiveNetErr = new Error(
+          `Lỗi kết nối mạng (${errMsg}) sau ${freshPipeAttempt + 1} lần tự động làm mới kết nối. Hãy kiểm tra mạng hoặc giảm Số luồng chạy song song.`
+        ) as Error & { isNetworkError?: boolean };
+        descriptiveNetErr.isNetworkError = true;
+        throw descriptiveNetErr;
+      } finally {
+        if (typeof window !== 'undefined' && !url.startsWith('/api/logs')) {
+          syncServerLogsFromApi(false).catch(() => {});
+        }
       }
 
-      const errMsg =
-        networkErr instanceof Error ? networkErr.message : String(networkErr);
-
-      if (freshPipeAttempt < MAX_FRESH_PIPE_RETRIES) {
-        logger.warn(
-          options.scope,
-          `🔄 [Làm mới Sợi dây 1 sau lỗi mạng ${(durationMs / 1000).toFixed(1)}s] Tự động mở kết nối mới (Reset đồng hồ 300s về 0s) — ${options.label}`,
-          {
-            reqId,
-            url,
-            durationMs,
-            errorMessage: errMsg,
-            nextPipeAttempt: freshPipeAttempt + 2,
-          },
-          reqId,
-          durationMs
-        );
-        continue;
-      }
-
-      logger.error(
-        options.scope,
-        `✖ Lỗi kết nối mạng (Network Fetch Failed) tại ${url} — ${options.label}`,
-        {
-          reqId,
-          url,
-          durationMs,
-          errorName: networkErr instanceof Error ? networkErr.name : 'Unknown',
-          errorMessage: errMsg,
-          ...(options.requestSummary || {}),
-        },
-        reqId,
-        durationMs
-      );
-      throw networkErr;
-    } finally {
-      if (typeof window !== 'undefined' && !url.startsWith('/api/logs')) {
-        syncServerLogsFromApi().catch(() => {});
-      }
-    }
-
-    const rawText = await res.text();
-    const durationMs = Date.now() - startMs;
-    const totalElapsedMs = Date.now() - overallStartMs;
-    const contentType = res.headers.get('content-type') || 'unknown';
-    const rawTrimmed = rawText.trim();
+      const durationMs = Date.now() - startMs;
+      const totalElapsedMs = Date.now() - overallStartMs;
+      const contentType = res.headers.get('content-type') || 'unknown';
+      const rawTrimmed = rawText.trim();
 
     // Try parsing JSON safely (Heartbeat spaces are stripped by rawTrimmed)
     let parsedData: T;
@@ -823,19 +874,27 @@ export async function safeFetchJson<T = Record<string, unknown>>(
       );
     }
 
-    return {
-      ok: effectiveOk,
-      status: effectiveStatus,
-      statusText: res.statusText,
-      durationMs: totalElapsedMs,
-      reqId,
-      rawText: rawTrimmed,
-      data: parsedData,
-      errorMessage: serverErrMessage,
-      debugTrace: serverDebugTrace,
-    };
-  }
+      return {
+        ok: effectiveOk,
+        status: effectiveStatus,
+        statusText: res.statusText,
+        durationMs: totalElapsedMs,
+        reqId,
+        rawText: rawTrimmed,
+        data: parsedData,
+        errorMessage: serverErrMessage,
+        debugTrace: serverDebugTrace,
+      };
+    }
 
-  throw new Error(`Đã thử mở lại kết nối mới ${MAX_FRESH_PIPE_RETRIES} lần nhưng không thành công.`);
+    throw new Error(`Đã thử mở lại kết nối mới ${MAX_FRESH_PIPE_RETRIES} lần nhưng không thành công.`);
+  } finally {
+    if (isLongRunningAiRoute) {
+      activeLongRunningAiCount = Math.max(0, activeLongRunningAiCount - 1);
+      if (typeof window !== 'undefined' && activeLongRunningAiCount === 0) {
+        syncServerLogsFromApi(true).catch(() => {});
+      }
+    }
+  }
 }
 

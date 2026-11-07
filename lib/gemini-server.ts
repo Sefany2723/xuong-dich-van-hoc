@@ -521,9 +521,9 @@ class ServerGeminiKeyPool {
     const opStartMs = Date.now();
     const attempts: KeyAttemptTrace[] = [];
 
-    // Per-attempt timeout (200s) and Fresh-Pipe threshold (35s)
-    const PER_ATTEMPT_TIMEOUT_MS = 200_000;
-    const FRESH_PIPE_THRESHOLD_MS = 35_000;
+    // Per-attempt timeout (165s) and Fresh-Pipe threshold (25s)
+    const PER_ATTEMPT_TIMEOUT_MS = 165_000;
+    const FRESH_PIPE_THRESHOLD_MS = 25_000;
 
     if (this.slots.length === 0) {
       logger.error(
@@ -854,20 +854,30 @@ class ServerGeminiKeyPool {
             continue;
           }
 
-          // Transient 503/500/overloaded/network/per-attempt-timeout -> put key on short cooldown & either rotate or trigger fresh pipe
+          // Transient 503/500/overloaded/network/per-attempt-timeout/truncated-json -> put key on short cooldown & either rotate or trigger fresh pipe
           const isTransientOrTimeout =
             msg.includes('503') ||
             msg.includes('502') ||
             msg.includes('504') ||
+            msg.includes('500') ||
             msg.includes('UNAVAILABLE') ||
             msg.includes('DEADLINE_EXCEEDED') ||
             msg.includes('[PER_ATTEMPT_TIMEOUT]') ||
+            msg.includes('[RETRYABLE_MODEL_OUTPUT]') ||
+            msg.includes('Model trả về phản hồi rỗng') ||
+            msg.includes('Phản hồi từ AI không đúng định dạng JSON') ||
             lower.includes('overloaded') ||
             lower.includes('internal error') ||
             lower.includes('fetch failed') ||
+            lower.includes('failed to fetch') ||
+            lower.includes('network') ||
+            lower.includes('und_err') ||
+            lower.includes('terminated') ||
             lower.includes('timeout') ||
             lower.includes('socket') ||
-            lower.includes('econnreset');
+            lower.includes('econnreset') ||
+            lower.includes('econnrefused') ||
+            lower.includes('etimedout');
 
           if (isTransientOrTimeout) {
             this.setSlotCooldown(slot, 12_000, targetModel, msg.slice(0, 180));
@@ -1335,28 +1345,59 @@ export function getAvailableThinkingLevelsFromSdk(
 }
 
 /**
+ * Resolves a model-safe thinking_level according to official @google/genai rules:
+ * - 'minimal' is only supported on Flash-Lite models (e.g. gemini-3.1-flash-lite).
+ * - On standard Flash (gemini-3.8-flash / gemini-flash-latest) and Pro/Argon models,
+ *   passing 'minimal' returns HTTP 400 INVALID_ARGUMENT, so it is safely promoted to 'low'.
+ */
+export function resolveModelSafeThinkingLevel(
+  thinkingLevel?: string | null,
+  modelName?: string | null
+): ThinkingLevelOption {
+  const normalized = normalizeThinkingLevel(thinkingLevel);
+  if (normalized === 'minimal' && modelName) {
+    const cleanModel = modelName.trim().toLowerCase();
+    if (!cleanModel.includes('lite')) {
+      return 'low';
+    }
+  }
+  return normalized;
+}
+
+/**
  * Builds generation_config for `ai.interactions.create` with configurable `thinking_level`
  * ('minimal' | 'low' | 'medium' | 'high', default 'high') and max_output_tokens: 65536.
+ * Per @google/genai v2.31.0 (`GenerationConfig_2`), `temperature` and `top_p` are @deprecated
+ * on Interactions API and omitted by default to prevent 400 errors on newer Gemini models.
  */
 export function buildInteractionGenerationConfig(
   thinkingLevel?: string | null,
-  extra?: Record<string, unknown>
+  extra?: Record<string, unknown>,
+  modelName?: string | null
 ): {
   thinking_level: ThinkingLevelOption;
   max_output_tokens: number;
   [key: string]: unknown;
 } {
+  const sanitizedExtra: Record<string, unknown> = { ...(extra || {}) };
+  delete sanitizedExtra.temperature;
+  delete sanitizedExtra.top_p;
+  delete sanitizedExtra.topP;
+  delete sanitizedExtra.topK;
+
   return {
-    ...(extra || {}),
-    thinking_level: normalizeThinkingLevel(thinkingLevel),
+    ...sanitizedExtra,
+    thinking_level: resolveModelSafeThinkingLevel(thinkingLevel, modelName),
     max_output_tokens: 65536,
   };
 }
 
 /**
  * Extracts output text from a Gemini Interactions API response (`ai.interactions.create`).
- * Prefers `interaction.output_text` (populated by @google/genai SDK >= 2.31.0)
- * and falls back to concatenating text content from `model_output` steps.
+ * Supports all 3 official @google/genai response shapes:
+ * 1. `interaction.output_text` (SDK convenience getter populated by `addOutputProperties`)
+ * 2. `interaction.steps` (`step.type === 'model_output'` -> `content[].type === 'text'`)
+ * 3. `interaction.outputs` (`output.type === 'text'`, direct wire shape in Interactions API docs)
  */
 export function extractInteractionText(interaction: {
   output_text?: string | null;
@@ -1365,6 +1406,10 @@ export function extractInteractionText(interaction: {
     content?:
       | Array<{ type?: string; text?: string }>
       | { type?: string; text?: string };
+  }>;
+  outputs?: Array<{
+    type?: string;
+    text?: string;
   }>;
 }): string {
   if (
@@ -1385,6 +1430,17 @@ export function extractInteractionText(interaction: {
             chunks.push(item.text);
           }
         }
+      }
+    }
+    if (chunks.length > 0) {
+      return chunks.join('');
+    }
+  }
+  if (Array.isArray(interaction?.outputs)) {
+    const chunks: string[] = [];
+    for (const output of interaction.outputs) {
+      if (output?.type === 'text' && typeof output.text === 'string') {
+        chunks.push(output.text);
       }
     }
     if (chunks.length > 0) {
@@ -1486,7 +1542,7 @@ export async function withHeartbeatStream(
 
       const heartbeatTimer = setInterval(() => {
         safeEnqueue(' ');
-      }, 8_000);
+      }, 5_000);
 
       try {
         const response = await handler();

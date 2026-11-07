@@ -89,14 +89,19 @@ export function splitTranslatedBodyIntoParagraphs(
 
 /**
  * Serialize an array of translated body paragraphs back into chapter translatedContent,
- * preserving empty slots via '\u200B' so 1:1 Block ID indices never collapse or shift.
+ * preserving empty slots via '\u200B' so 1:1 Block ID indices never collapse or shift,
+ * and preserving single internal newlines (\n) for poetry/system tables while collapsing
+ * accidental blank lines (\n\n+) inside a single block.
  */
 export function serializeBodyBlocksToContent(
   bodyParagraphs: string[],
   trimEdges = false
 ): string {
   const sanitized = bodyParagraphs.map((p) => {
-    const base = (p || '').replace(/\u200B/g, '').replace(/\r?\n+/g, ' ');
+    const base = (p || '')
+      .replace(/\u200B/g, '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\n[ \t]*\n+/g, '\n');
     return trimEdges ? base.trim() : base;
   });
   // If every single block is empty, return empty string
@@ -129,7 +134,13 @@ export function materializeBlocksToChapter(
   for (const item of returnedBlocks || []) {
     if (!item || typeof item.id !== 'string') continue;
     const id = item.id.trim();
-    const text = typeof item.translation === 'string' ? item.translation.trim() : '';
+    const text =
+      typeof item.translation === 'string'
+        ? item.translation
+            .replace(/\r\n/g, '\n')
+            .replace(/\n[ \t]*\n+/g, '\n')
+            .trim()
+        : '';
     if (map.has(id)) {
       duplicateIds.push(id);
     }
@@ -146,9 +157,9 @@ export function materializeBlocksToChapter(
     }
   }
 
-  let titleTranslated = (map.get('TITLE') || '').replace(/\r?\n/g, ' ').trim();
+  let titleTranslated = (map.get('TITLE') || '').replace(/\r?\n+/g, ' ').trim();
   if (!titleTranslated) {
-    titleTranslated = `Chương ${chapterNumber}`;
+    titleTranslated = `Chương ${chapterNumber}: Không đề`;
   }
 
   const bodyTranslations: string[] = [];

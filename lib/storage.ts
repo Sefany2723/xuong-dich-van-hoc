@@ -27,36 +27,94 @@ import { logger, safeFetchJson } from './logger';
 const DB_NAME = 'MacHuongCacStudioDB';
 const DB_VERSION = 2;
 
+let cachedDb: IDBDatabase | null = null;
+let pendingDbPromise: Promise<IDBDatabase> | null = null;
+
 function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains('novels')) {
-        db.createObjectStore('novels', { keyPath: 'id' });
+  if (cachedDb) {
+    return Promise.resolve(cachedDb);
+  }
+  if (pendingDbPromise) {
+    return pendingDbPromise;
+  }
+
+  pendingDbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        pendingDbPromise = null;
+        reject(new Error('IndexedDB open timeout after 4000ms'));
       }
-      if (!db.objectStoreNames.contains('chapters')) {
-        const chapterStore = db.createObjectStore('chapters', { keyPath: 'id' });
-        chapterStore.createIndex('novelId', 'novelId', { unique: false });
+    }, 4000);
+
+    try {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('novels')) {
+          db.createObjectStore('novels', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('chapters')) {
+          const chapterStore = db.createObjectStore('chapters', { keyPath: 'id' });
+          chapterStore.createIndex('novelId', 'novelId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('glossary')) {
+          const glossaryStore = db.createObjectStore('glossary', { keyPath: 'id' });
+          glossaryStore.createIndex('novelId', 'novelId', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('instructions')) {
+          db.createObjectStore('instructions', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('customFonts')) {
+          db.createObjectStore('customFonts', { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains('highlights')) {
+          const hlStore = db.createObjectStore('highlights', { keyPath: 'id' });
+          hlStore.createIndex('novelId', 'novelId', { unique: false });
+        }
+      };
+      req.onsuccess = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        const db = req.result;
+        db.onversionchange = () => {
+          db.close();
+          if (cachedDb === db) cachedDb = null;
+        };
+        db.onclose = () => {
+          if (cachedDb === db) cachedDb = null;
+        };
+        cachedDb = db;
+        pendingDbPromise = null;
+        resolve(db);
+      };
+      req.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        pendingDbPromise = null;
+        reject(req.error || new Error('IndexedDB open error'));
+      };
+      req.onblocked = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        pendingDbPromise = null;
+        reject(new Error('IndexedDB blocked by another tab'));
+      };
+    } catch (err) {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeoutId);
+        pendingDbPromise = null;
+        reject(err);
       }
-      if (!db.objectStoreNames.contains('glossary')) {
-        const glossaryStore = db.createObjectStore('glossary', { keyPath: 'id' });
-        glossaryStore.createIndex('novelId', 'novelId', { unique: false });
-      }
-      if (!db.objectStoreNames.contains('instructions')) {
-        db.createObjectStore('instructions', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('customFonts')) {
-        db.createObjectStore('customFonts', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('highlights')) {
-        const hlStore = db.createObjectStore('highlights', { keyPath: 'id' });
-        hlStore.createIndex('novelId', 'novelId', { unique: false });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    }
   });
+
+  return pendingDbPromise;
 }
 
 export async function getAllNovels(): Promise<NovelProject[]> {

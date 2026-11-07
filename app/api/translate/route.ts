@@ -20,18 +20,10 @@ import {
   splitRawIntoBlocks,
 } from '@/lib/block-engine';
 import { normalizeVietnameseText } from '@/lib/storage';
+import { DEFAULT_INSTRUCTION_PROFILES } from '@/lib/seed-data';
 
-const DEFAULT_TRANSLATION_SYSTEM_PROMPT = `Bạn là Dịch Giả Tiểu Thuyết Trung Quốc (Hán Việt / Tiên Hiệp / Huyền Huyễn / Ngôn Tình / Đô Thị) chuyên nghiệp hàng đầu.
-Nhiệm vụ của bạn là dịch trọn vẹn từng Block ID của chương truyện tiếng Trung sang tiếng Việt mượt mà, giàu hình ảnh văn học, đúng ngữ cảnh và xưng hô.
-
-QUY TẮC BẮT BUỘC (STRUCTURED BLOCKS-V1):
-1. Đầu vào được cung cấp dưới dạng JSON gồm các Block có mã định danh cố định: "TITLE" (tiêu đề chương) và "P0001", "P0002", ... (từng đoạn văn).
-2. Bắt buộc trả về đúng chuẩn JSON Schema gồm mảng "blocks", trong đó MỖI phần tử {"id", "translation"} khớp chính xác 1:1 với "id" của đầu vào.
-3. KHÔNG ĐƯỢC gộp 2 block làm 1, KHÔNG ĐƯỢC tách 1 block thành 2, KHÔNG ĐƯỢC bỏ sót bất kỳ mã ID nào.
-4. Mỗi "translation" là một đoạn văn đơn, KHÔNG chứa ký tự xuống dòng (\\n).
-5. TUYỆT ĐỐI KHÔNG để sót bất kỳ chữ Hán (ký tự Trung Quốc) nào trong kết quả tiếng Việt.
-6. TUYỆT ĐỐI KHÔNG chêm từ tiếng Anh vô duyên (như "but", "however", "and", "so", "well", "ok"...) vào câu văn tiếng Việt.
-7. Tiêu đề chương (block "TITLE") dịch chuẩn định dạng "Chương X: [Tên chương tiếng Việt]".`;
+const FALLBACK_TRANSLATION_SYSTEM_PROMPT =
+  DEFAULT_INSTRUCTION_PROFILES[0]?.systemInstruction || '';
 
 export async function POST(req: NextRequest) {
   return withHeartbeatStream(req, async () => {
@@ -134,25 +126,23 @@ export async function POST(req: NextRequest) {
       reqId
     );
 
-    const customInstructionSection = systemInstruction.trim()
-      ? `\n\n[CHỈ DẪN PHONG CÁCH & XƯNG HÔ RIÊNG CỦA BỘ TRUYỆN]:\n${systemInstruction.trim()}`
-      : '';
+    const basePresetInstruction = systemInstruction.trim()
+      ? systemInstruction.trim()
+      : FALLBACK_TRANSLATION_SYSTEM_PROMPT;
 
-    const fullSystemPrompt = `${DEFAULT_TRANSLATION_SYSTEM_PROMPT}${customInstructionSection}${glossarySection}`;
+    // If a user selected a custom preset that doesn't mention the {"blocks"} contract, append a concise wire contract reminder
+    const wireContractReminder = basePresetInstruction.includes('"blocks"')
+      ? ''
+      : `\n\n[GIAO THỨC ĐẦU RA THEO ID (BLOCKS-V1)]:\nInput chứa mảng \`blocks\` gồm \`id\` ("TITLE", "P0001"...) và \`source\`. Chỉ trả về JSON đúng schema \`{"blocks":[{"id":"TITLE","translation":"Chương ${chapterNumber}: ..."},{"id":"P0001","translation":"..."}]}\` khớp đủ 100% mọi \`id\` theo đúng thứ tự, không bỏ sót và không để bản dịch rỗng.`;
 
-    const wireInputJson = JSON.stringify(
-      {
-        schema: 'blocks-v1',
-        chapterNumber,
-        expectedBlockCount: rawBlocks.length,
-        blocks: rawBlocks.map((b) => ({
-          id: b.id,
-          source: b.source,
-        })),
-      },
-      null,
-      2
-    );
+    const fullSystemPrompt = `${basePresetInstruction}${wireContractReminder}${glossarySection}`;
+
+    const wireInputJson = JSON.stringify({
+      blocks: rawBlocks.map((b) => ({
+        id: b.id,
+        source: b.source,
+      })),
+    });
 
     const idPropertySchema: Record<string, unknown> = {
       type: 'string',
@@ -164,7 +154,7 @@ export async function POST(req: NextRequest) {
     }
 
     const {
-      result: interaction,
+      result: returnedBlocks,
       keyIndexUsed,
       totalKeys,
       modelUsed,
@@ -172,14 +162,15 @@ export async function POST(req: NextRequest) {
       attempts,
     } = await geminiKeyPool.executeWithKeyRotation(
       async (ai, slotInfo) => {
-        return await ai.interactions.create({
+        const interaction = await ai.interactions.create({
           model: slotInfo.activeModel,
           store: false,
           system_instruction: fullSystemPrompt,
           input: wireInputJson,
           generation_config: buildInteractionGenerationConfig(
             resolvedThinkingLevel,
-            { temperature: 0.3 }
+            undefined,
+            slotInfo.activeModel
           ),
           response_format: {
             type: 'object',
@@ -195,7 +186,7 @@ export async function POST(req: NextRequest) {
                     translation: {
                       type: 'string',
                       description:
-                        'Bản dịch tiếng Việt mượt mà của block này (1 đoạn duy nhất, không chứa ký tự xuống dòng).',
+                        'Bản dịch tiếng Việt đầy đủ của block cùng ID (TITLE chỉ chứa 1 dòng "Chương N: ..."; các block P0001.. có thể giữ xuống dòng đơn \\n nội bộ cho thơ/hệ thống).',
                     },
                   },
                   required: ['id', 'translation'],
@@ -207,6 +198,19 @@ export async function POST(req: NextRequest) {
             additionalProperties: false,
           },
         });
+
+        const rawText = extractInteractionText(interaction).trim();
+        const parsed = safeParseInteractionJson<{
+          blocks?: Array<{ id: string; translation: string }>;
+        }>(rawText, `TranslateChapter#${chapterNumber}[${reqId}]`);
+
+        const blocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];
+        if (blocks.length === 0) {
+          throw new Error(
+            '[RETRYABLE_MODEL_OUTPUT] Model trả về mảng blocks rỗng (0 đoạn dịch).'
+          );
+        }
+        return blocks;
       },
       selectedModel,
       cleanFallbackModel,
@@ -218,12 +222,6 @@ export async function POST(req: NextRequest) {
       }
     );
 
-    const rawText = extractInteractionText(interaction).trim();
-    const parsed = safeParseInteractionJson<{
-      blocks?: Array<{ id: string; translation: string }>;
-    }>(rawText, `TranslateChapter#${chapterNumber}[${reqId}]`);
-
-    const returnedBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];
     const materialized = materializeBlocksToChapter(
       returnedBlocks,
       rawBlocks,

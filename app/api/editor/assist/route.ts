@@ -21,6 +21,15 @@ import {
   splitTranslatedBodyIntoParagraphs,
 } from '@/lib/block-engine';
 import { normalizeVietnameseText } from '@/lib/storage';
+import {
+  DEFAULT_EDITORIAL_INSTRUCTION_ID,
+  DEFAULT_INSTRUCTION_PROFILES,
+} from '@/lib/seed-data';
+
+const FALLBACK_EDITORIAL_SYSTEM_PROMPT =
+  DEFAULT_INSTRUCTION_PROFILES.find(
+    (p) => p.id === DEFAULT_EDITORIAL_INSTRUCTION_ID
+  )?.systemInstruction || '';
 
 interface DirtyBlockTarget {
   id: string;
@@ -123,25 +132,31 @@ export async function POST(req: NextRequest) {
       reqId
     );
 
+    const isBlockTargetMode =
+      Array.isArray(targets) &&
+      targets.length > 0 &&
+      (action === 'block_cleanup' ||
+        action === 'polish' ||
+        action === 'fix_pronouns' ||
+        action === 'custom');
+
     let glossaryNote = '';
     if (includeGlossary && Array.isArray(glossary) && glossary.length > 0) {
-      const combinedSource =
-        action === 'block_cleanup'
-          ? targets.map((t) => t.source || '').join('\n')
-          : action === 'realign_chapter'
-            ? `${titleRaw}\n${rawContent}`
-            : `${rawReference}\n${selectedText}`;
-      const combinedTranslated =
-        action === 'block_cleanup'
-          ? targets
-              .map(
-                (t) =>
-                  `${t.contextBefore || ''} ${t.translation || ''} ${t.contextAfter || ''}`
-              )
-              .join('\n')
-          : action === 'realign_chapter'
-            ? `${titleTranslated}\n${translatedContent}`
-            : `${selectedText}\n${surroundingContext}`;
+      const combinedSource = isBlockTargetMode
+        ? targets.map((t) => t.source || '').join('\n')
+        : action === 'realign_chapter'
+          ? `${titleRaw}\n${rawContent}`
+          : `${rawReference}\n${selectedText}`;
+      const combinedTranslated = isBlockTargetMode
+        ? targets
+            .map(
+              (t) =>
+                `${t.contextBefore || ''} ${t.translation || ''} ${t.contextAfter || ''}`
+            )
+            .join('\n')
+        : action === 'realign_chapter'
+          ? `${titleTranslated}\n${translatedContent}`
+          : `${selectedText}\n${surroundingContext}`;
       const contextual = buildContextualGlossaryPromptSection(
         glossary,
         combinedSource,
@@ -151,17 +166,17 @@ export async function POST(req: NextRequest) {
       glossaryNote = contextual.promptSection;
     }
 
-    const editorialPersonaNote = systemInstruction.trim()
-      ? `\n[CHỈ DẪN BIÊN TẬP CỦA DỰ ÁN]:\n${systemInstruction.trim()}`
+    const baseEditorialInstruction = systemInstruction.trim()
+      ? systemInstruction.trim()
+      : FALLBACK_EDITORIAL_SYSTEM_PROMPT;
+
+    const pronounNote = pronounRule.trim()
+      ? `\n\n[QUY TẮC XƯNG HÔ BỔ SUNG CỦA BỘ TRUYỆN]: ${pronounRule.trim()}`
       : '';
 
-    const systemPrompt = `Bạn là Biên Tập Viên Tiểu Thuyết Trung - Việt cao cấp của Mặc Hương Các Studio.
-Quy tắc bắt buộc:
-- Biên tập, dịch bù chữ Hán sót, khử từ tiếng Anh lọt vào câu ('but', 'however', 'and'...) và chuốt văn phong tiếng Việt mượt mà.
-- Không tự ý cắt bỏ tình tiết, giữ nguyên bố cục đoạn văn theo yêu cầu.
-- Quy tắc xưng hô áp dụng: ${pronounRule || 'Theo đúng ngữ cảnh cổ trang / tiên hiệp'}.${editorialPersonaNote}${glossaryNote}`;
+    const systemPrompt = `${baseEditorialInstruction}${pronounNote}${glossaryNote}`;
 
-    // MODE 0: Full-Chapter Re-Alignment & Editorial (`realign_chapter` — used when chapter has QA Block Misalignment or Full-Chapter Structured Polish)
+    // MODE 0: Full-Chapter Re-Alignment & Editorial (`realign_chapter` — uses `{ updates: [{ id, translation }] }` per Mode B of 1.14.1 & 1.14.0 Editorial Presets)
     if (action === 'realign_chapter') {
       if (!rawContent || !rawContent.trim()) {
         return NextResponse.json(
@@ -179,34 +194,35 @@ Quy tắc bắt buộc:
         'auto'
       );
 
+      const fullChapterTargets = rawBlocks.map((b, idx) => {
+        if (b.id === 'TITLE') {
+          return {
+            id: 'TITLE',
+            source: b.source,
+            translation: titleTranslated || '',
+          };
+        }
+        const bodyIdx = idx - 1;
+        return {
+          id: b.id,
+          source: b.source,
+          translation: draftParagraphs[bodyIdx] || '',
+        };
+      });
+
       const fullRealignSystemPrompt = `${systemPrompt}
 
-QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAPTER-REALIGN-BLOCKS-V1):
-1. Chương này đang được gửi TOÀN BỘ (gồm danh sách "rawBlocks" nguyên tác tiếng Trung có mã cố định "TITLE", "P0001".."P${String(rawBodyCount).padStart(4, '0')}" và bản dịch tiếng Việt hiện có "existingVietnameseDraft").
-2. Lý do gửi cả chương: Bản dịch tiếng Việt hiện tại có ${draftParagraphs.length} đoạn trong khi nguyên tác có ${rawBodyCount} đoạn (bị lệch nhịp đoạn ở giữa/cuối chương), hoặc cần biên tập đồng bộ toàn chương.
-3. Nhiệm vụ của bạn:
-   - Đối chiếu toàn bộ "rawBlocks" với "existingVietnameseDraft" từ đầu đến cuối chương.
-   - Tận dụng tối đa câu chữ, từ vựng và văn phong đã dịch tốt trong "existingVietnameseDraft", nhưng PHÂN BỔ LẠI (tách đoạn bị gộp, gộp đoạn bị tách thừa, hoặc dịch bù phần nguyên tác bị bỏ sót) sao cho kết quả trả về khớp CHÍNH XÁC 1:1 với từng mã "id" ("TITLE", "P0001", "P0002"...) của "rawBlocks".
-   - TUYỆT ĐỐI KHÔNG dịch lặp lại nội dung ở cuối chương, KHÔNG bỏ sót hay thêm bớt bất kỳ mã ID nào.
-   - Dọn sạch 100% chữ Hán còn sót, xóa từ tiếng Anh chêm sai ('but', 'however', 'and'...) và chuốt mượt câu văn tiếng Việt. Mỗi "translation" là 1 đoạn duy nhất không chứa ký tự xuống dòng (\\n).`;
+[GIAO THỨC CẬP NHẬT BLOCK TOÀN CHƯƠNG]:
+Đối chiếu toàn bộ danh sách \`targets\` (từ "TITLE", "P0001" đến "P${String(rawBodyCount).padStart(4, '0')}") với bản dịch hiện tại (\`existingVietnameseDraft\`). Tận dụng tối đa câu chữ đã dịch tốt nhưng phân bổ lại (tách đoạn bị gộp, gộp đoạn bị tách thừa, dịch bù phần thiếu, dọn sạch chữ Hán và lỗi "But") để trả về đúng schema \`{"updates":[{"id":"TITLE","translation":"Chương ${chapterNumber || 1}: ..."},{"id":"P0001","translation":"..."}]}\` khớp 100% mọi \`id\` trong \`targets\` theo đúng thứ tự.`;
 
       const wirePayload = JSON.stringify(
         {
-          schema: 'chapter-realign-edit-v1',
+          protocol: 'GIAO THỨC CẬP NHẬT BLOCK',
           chapterNumber: chapterNumber || 1,
-          expectedBlockCount: rawBlocks.length,
-          rawBodyBlockCount: rawBodyCount,
-          draftBodyParagraphCount: draftParagraphs.length,
-          rawBlocks: rawBlocks.map((b) => ({
-            id: b.id,
-            source: b.source,
-          })),
+          targets: fullChapterTargets,
           existingVietnameseDraft: {
             title: titleTranslated || '',
-            paragraphs: draftParagraphs.map((text, idx) => ({
-              draftOrder: `DRAFT_${String(idx + 1).padStart(4, '0')}`,
-              text,
-            })),
+            paragraphs: draftParagraphs,
           },
         },
         null,
@@ -216,14 +232,14 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
       const idPropertySchema: Record<string, unknown> = {
         type: 'string',
         description:
-          'Mã định danh block nguyên gốc (TITLE, P0001, P0002...). Phải khớp 1:1 với rawBlocks.',
+          'Mã định danh block nguyên gốc (TITLE, P0001, P0002...). Phải khớp 1:1 với targets.',
       };
       if (expectedBlockIds.length <= 64) {
         idPropertySchema.enum = expectedBlockIds;
       }
 
       const {
-        result: interaction,
+        result: rawJson,
         keyIndexUsed,
         totalKeys,
         modelUsed,
@@ -231,22 +247,23 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
         attempts,
       } = await geminiKeyPool.executeWithKeyRotation(
         async (ai, slotInfo) => {
-          return await ai.interactions.create({
+          const interaction = await ai.interactions.create({
             model: slotInfo.activeModel,
             store: false,
             system_instruction: fullRealignSystemPrompt,
             input: wirePayload,
             generation_config: buildInteractionGenerationConfig(
               resolvedThinkingLevel,
-              { temperature: 0.25 }
+              undefined,
+              slotInfo.activeModel
             ),
             response_format: {
               type: 'object',
               properties: {
-                blocks: {
+                updates: {
                   type: 'array',
                   description:
-                    'Danh sách đầy đủ các block đã biên tập và căn chỉnh 1:1 theo đúng thứ tự rawBlocks (bắt đầu bằng TITLE, tiếp theo là P0001, P0002...).',
+                    'Danh sách đầy đủ các block đã biên tập và căn chỉnh 1:1 theo đúng thứ tự targets (bắt đầu bằng TITLE, tiếp theo là P0001, P0002...).',
                   items: {
                     type: 'object',
                     properties: {
@@ -254,7 +271,7 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
                       translation: {
                         type: 'string',
                         description:
-                          'Bản tiếng Việt đã căn chỉnh đúng vị trí ID và biên tập sạch chữ Hán / lỗi QA (1 đoạn duy nhất, không chứa ký tự xuống dòng).',
+                          'Toàn bộ nội dung tiếng Việt đã biên tập và căn chỉnh của block cùng ID.',
                       },
                     },
                     required: ['id', 'translation'],
@@ -262,10 +279,28 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
                   },
                 },
               },
-              required: ['blocks'],
+              required: ['updates'],
               additionalProperties: false,
             },
           });
+
+          const parsed = safeParseInteractionJson<{
+            updates?: Array<{ id: string; translation: string }>;
+            blocks?: Array<{ id: string; translation: string }>;
+          }>(extractInteractionText(interaction), `RealignChapter[${reqId}]`);
+
+          const list = Array.isArray(parsed.updates)
+            ? parsed.updates
+            : Array.isArray(parsed.blocks)
+              ? parsed.blocks
+              : [];
+
+          if (list.length === 0) {
+            throw new Error(
+              '[RETRYABLE_MODEL_OUTPUT] Model trả về mảng updates rỗng khi biên tập chương.'
+            );
+          }
+          return list;
         },
         selectedModel,
         cleanFallbackModel,
@@ -277,16 +312,20 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
         }
       );
 
-      const rawJson = safeParseInteractionJson<{
-        blocks?: Array<{ id: string; translation: string }>;
-      }>(extractInteractionText(interaction), `RealignChapter[${reqId}]`);
-
-      const cleanedBlocks = (rawJson.blocks || []).map((b) => ({
-        id: String(b.id || '').trim(),
-        translation: normalizeVietnameseText(String(b.translation || ''))
-          .replace(/\r?\n+/g, ' ')
-          .trim(),
-      }));
+      const cleanedBlocks = (rawJson || []).map((b) => {
+        const cleanId = String(b.id || '').trim();
+        const rawTr = normalizeVietnameseText(String(b.translation || ''));
+        return {
+          id: cleanId,
+          translation:
+            cleanId === 'TITLE'
+              ? rawTr.replace(/\r?\n+/g, ' ').trim()
+              : rawTr
+                  .replace(/\r\n/g, '\n')
+                  .replace(/\n[ \t]*\n+/g, '\n')
+                  .trim(),
+        };
+      });
 
       const materialized = materializeBlocksToChapter(
         cleanedBlocks,
@@ -351,23 +390,41 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
       });
     }
 
-    // MODE 1: Targeted Block-ID AI Cleanup (`block_cleanup` — returns `{ updates: [{ id, translation }] }`)
-    if (action === 'block_cleanup') {
+    // MODE 1: Targeted Block-ID AI Assist (`block_cleanup`, `polish`, `fix_pronouns`, `custom` with `targets` — Chế độ B của Preset Biên tập 1.14.1 & 1.14.0: returns `{ updates: [{ id, translation }] }`)
+    if (isBlockTargetMode || action === 'block_cleanup') {
       if (!Array.isArray(targets) || targets.length === 0) {
         return NextResponse.json(
-          { error: 'Không có Block ID nào cần dọn lỗi.' },
+          { error: 'Không có Block ID nào cần biên tập.' },
           { status: 400 }
         );
       }
 
       const targetIds = targets.map((t) => t.id);
 
+      const normalizedTargets = targets.map((t) => ({
+        id: t.id,
+        source: t.source || '',
+        translation: t.translation || '',
+        ...(t.contextBefore ? { contextBefore: t.contextBefore } : {}),
+        ...(t.contextAfter ? { contextAfter: t.contextAfter } : {}),
+      }));
+
+      let blockGoal =
+        'Dọn chữ Hán hoặc “But” theo block ID: chỉ cập nhật các ID trong targets và trả về {"updates":[{"id":"...","translation":"..."}]}.';
+      if (action === 'polish') {
+        blockGoal =
+          'Trôi chảy (Làm câu mượt hơn) theo block ID: đối chiếu nguyên văn (source) và ngữ cảnh (contextBefore/contextAfter), chuốt lại câu chữ tiếng Việt của target cho tự nhiên, sáng rõ, giàu nhịp điệu nhưng giữ nguyên 100% nghĩa, rồi trả về {"updates":[{"id":"...","translation":"..."}]}.';
+      } else if (action === 'fix_pronouns') {
+        blockGoal = `Thuật ngữ & Xưng hô theo block ID: đối chiếu nguyên văn (source), ngữ cảnh xung quanh (contextBefore/contextAfter) và quy tắc xưng hô (${pronounRule || 'theo vai vế, quan hệ'}) để đồng bộ lại đại từ xưng hô trong target, rồi trả về {"updates":[{"id":"...","translation":"..."}]}.`;
+      } else if (action === 'custom') {
+        blockGoal = `Tùy chỉnh theo block ID (${customPrompt.trim() || 'Sửa câu văn tự nhiên, chuẩn xác theo nguyên văn'}): chỉ cập nhật các ID trong targets và trả về {"updates":[{"id":"...","translation":"..."}]}.`;
+      }
+
       const wirePayload = JSON.stringify(
         {
-          schema: 'block-cleanup-v1',
-          instruction:
-            'Chỉ sửa các block nằm trong danh sách targets bên dưới. Loại bỏ triệt để chữ Hán còn sót, xóa từ tiếng Anh chêm sai (như "but", "however", "and"), dịch bù nếu draft đang trống dựa trên source tiếng Trung, và giữ nguyên văn mạch (prevDraft/nextDraft). Trả về đúng mã id của từng target.',
-          targets,
+          protocol: 'GIAO THỨC CẬP NHẬT BLOCK',
+          goal: blockGoal,
+          targets: normalizedTargets,
         },
         null,
         2
@@ -375,14 +432,14 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
 
       const idPropertySchema: Record<string, unknown> = {
         type: 'string',
-        description: 'Mã Block ID (TITLE, P0001, P0002...).',
+        description: 'Mã Block ID trong targets (TITLE, P0001, P0002...).',
       };
       if (targetIds.length <= 64) {
         idPropertySchema.enum = targetIds;
       }
 
       const {
-        result: interaction,
+        result: rawJson,
         keyIndexUsed,
         totalKeys,
         modelUsed,
@@ -390,14 +447,15 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
         attempts,
       } = await geminiKeyPool.executeWithKeyRotation(
         async (ai, slotInfo) => {
-          return await ai.interactions.create({
+          const interaction = await ai.interactions.create({
             model: slotInfo.activeModel,
             store: false,
             system_instruction: systemPrompt,
             input: wirePayload,
             generation_config: buildInteractionGenerationConfig(
               resolvedThinkingLevel,
-              { temperature: 0.2 }
+              undefined,
+              slotInfo.activeModel
             ),
             response_format: {
               type: 'object',
@@ -405,7 +463,7 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
                 updates: {
                   type: 'array',
                   description:
-                    'Danh sách các block đã được làm sạch tương ứng 1:1 với các id trong targets.',
+                    'Danh sách các block đã được sửa tương ứng 1:1 với mọi target ID trong targets.',
                   items: {
                     type: 'object',
                     properties: {
@@ -413,7 +471,7 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
                       translation: {
                         type: 'string',
                         description:
-                          'Bản tiếng Việt hoàn chỉnh, sạch 100% Hán tự và từ tiếng Anh thừa, không xuống dòng.',
+                          'Toàn bộ nội dung đã sửa của block này (sạch chữ Hán sót và lỗi But/tiếng Anh thừa).',
                       },
                     },
                     required: ['id', 'translation'],
@@ -425,26 +483,40 @@ QUY TẮC BẮT BUỘC KHI BIÊN TẬP & CĂN CHỈNH LẠI TOÀN CHƯƠNG (CHAP
               additionalProperties: false,
             },
           });
+
+          const parsed = safeParseInteractionJson<{
+            updates?: Array<{ id: string; translation: string }>;
+          }>(extractInteractionText(interaction), `BlockAssist:${action}[${reqId}]`);
+          if (!Array.isArray(parsed.updates) || parsed.updates.length === 0) {
+            throw new Error(
+              '[RETRYABLE_MODEL_OUTPUT] Model trả về mảng updates rỗng khi biên tập block.'
+            );
+          }
+          return parsed;
         },
         selectedModel,
         cleanFallbackModel,
         {
           reqId,
           endpoint: '/api/editor/assist',
-          label: `block_cleanup (${targets.length} blocks • thinking=${resolvedThinkingLevel})`,
+          label: `${action}_blocks (${targets.length} blocks • thinking=${resolvedThinkingLevel})`,
           signal: req.signal,
         }
       );
-
-      const rawJson = safeParseInteractionJson<{
-        updates?: Array<{ id: string; translation: string }>;
-      }>(extractInteractionText(interaction), `BlockCleanup[${reqId}]`);
-      const cleanedUpdates = (rawJson.updates || []).map((u) => ({
-        id: String(u.id || '').trim(),
-        translation: normalizeVietnameseText(String(u.translation || ''))
-          .replace(/\r?\n+/g, ' ')
-          .trim(),
-      }));
+      const cleanedUpdates = (rawJson.updates || []).map((u) => {
+        const cleanId = String(u.id || '').trim();
+        const rawTr = normalizeVietnameseText(String(u.translation || ''));
+        return {
+          id: cleanId,
+          translation:
+            cleanId === 'TITLE'
+              ? rawTr.replace(/\r?\n+/g, ' ').trim()
+              : rawTr
+                  .replace(/\r\n/g, '\n')
+                  .replace(/\n[ \t]*\n+/g, '\n')
+                  .trim(),
+        };
+      });
 
       const routeDurationMs = Date.now() - routeStartMs;
       const debugTrace: ServerDebugTrace = {
@@ -497,7 +569,7 @@ ${rawReference ? `[NGUYÊN BẢN TIẾNG TRUNG THAM CHIẾU]:\n${rawReference}\n
 ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}`;
 
       const {
-        result: interaction,
+        result: parsed,
         keyIndexUsed,
         totalKeys,
         modelUsed,
@@ -505,14 +577,15 @@ ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}
         attempts,
       } = await geminiKeyPool.executeWithKeyRotation(
         async (ai, slotInfo) => {
-          return await ai.interactions.create({
+          const interaction = await ai.interactions.create({
             model: slotInfo.activeModel,
             store: false,
             system_instruction: systemPrompt,
             input: promptText,
             generation_config: buildInteractionGenerationConfig(
               resolvedThinkingLevel,
-              { temperature: 0.65 }
+              undefined,
+              slotInfo.activeModel
             ),
             response_format: {
               type: 'object',
@@ -527,6 +600,9 @@ ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}
               additionalProperties: false,
             },
           });
+          return safeParseInteractionJson<{
+            alternatives?: string[];
+          }>(extractInteractionText(interaction), `Alternatives[${reqId}]`);
         },
         selectedModel,
         cleanFallbackModel,
@@ -537,10 +613,6 @@ ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}
           signal: req.signal,
         }
       );
-
-      const parsed = safeParseInteractionJson<{
-        alternatives?: string[];
-      }>(extractInteractionText(interaction), `Alternatives[${reqId}]`);
       const routeDurationMs = Date.now() - routeStartMs;
       return NextResponse.json({
         alternatives: (parsed.alternatives || []).map((s) =>
@@ -568,37 +640,38 @@ ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}
       });
     }
 
-    // MODE 3: Single-Passage or Full-Chapter Editorial Action
+    // MODE 3: Chế độ A của Preset Biên tập 1.14.1 (Mục 2A) & 1.14.0 (Mục 14A):
+    // Không có `targets` -> trả về đúng `{"translation": "..."}`
     let taskInstruction = '';
     if (action === 'polish') {
       taskInstruction =
-        'Hãy biên tập, chuốt lại câu chữ tiếng Việt dưới đây cho thật mượt mà, thoát ý, giàu nhạc điệu văn học mà vẫn giữ nguyên 100% ý nghĩa và số đoạn văn.';
+        'Mục tiêu biên tập: Làm câu mượt hơn (Trôi chảy) — biên tập, chuốt lại câu chữ tiếng Việt dưới đây cho thật mượt mà, thoát ý, giàu nhạc điệu văn học mà vẫn giữ nguyên 100% ý nghĩa và số đoạn văn.';
     } else if (action === 'fix_pronouns') {
-      taskInstruction = `Hãy kiểm tra và đồng bộ lại toàn bộ đại từ xưng hô trong đoạn văn dưới đây theo chuẩn "${
+      taskInstruction = `Mục tiêu biên tập: Đồng bộ thuật ngữ và xưng hô — kiểm tra và đồng bộ lại toàn bộ đại từ xưng hô trong đoạn văn dưới đây theo chuẩn "${
         pronounRule || 'Ta - Ngươi / Huynh - Đệ'
       }" phù hợp ngữ cảnh nhân vật.`;
     } else if (action === 'fix_qa') {
       taskInstruction =
-        'Hãy quét và dịch sạch toàn bộ các chữ Hán (ký tự Trung Quốc) còn sót hoặc các từ tiếng Anh bị lọt vô duyên (như "but", "and", "however") trong văn bản dưới đây sang tiếng Việt tự nhiên. Giữ nguyên số dòng/đoạn.';
+        'Mục tiêu biên tập: Xử lý cảnh báo Hán / "But" — quét và dịch sạch toàn bộ các chữ Hán còn sót hoặc các câu/từ tiếng Anh bị lọt (như "But", "and", "however") trong văn bản dưới đây sang tiếng Việt tự nhiên. Giữ nguyên số dòng/đoạn.';
     } else if (action === 'translate_title') {
       taskInstruction =
-        'Hãy dịch tiêu đề chương này sang tiếng Việt thật hay, chuẩn phong cách tiểu thuyết (Định dạng: Chương X: Tên chương).';
+        'Mục tiêu biên tập: Tiêu đề chương — dịch/biên tập tiêu đề chương này sang tiếng Việt thật hay, chuẩn định dạng "Chương N: Tên chương tiếng Việt".';
     } else {
       taskInstruction =
         customPrompt.trim() ||
-        'Hãy biên tập lại đoạn văn dưới đây cho mượt mà hơn.';
+        'Mục tiêu biên tập: Sửa chính tả, ngữ pháp và làm câu văn mượt mà hơn.';
     }
 
     const promptText = `${taskInstruction}
 
-[VĂN BẢN CẦN XỬ LÝ]:
+[BẢN DỊCH ACTIVE CẦN BIÊN TẬP]:
 ${selectedText}
 
-${rawReference ? `[NGUYÊN BẢN TIẾNG TRUNG ĐỐI CHIẾU]:\n${rawReference}\n` : ''}
+${rawReference ? `[NGUYÊN VĂN TIẾNG TRUNG ĐỐI CHIẾU]:\n${rawReference}\n` : ''}
 ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}`;
 
     const {
-      result: interaction,
+      result: parsed,
       keyIndexUsed,
       totalKeys,
       modelUsed,
@@ -606,27 +679,33 @@ ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}
       attempts,
     } = await geminiKeyPool.executeWithKeyRotation(
       async (ai, slotInfo) => {
-        return await ai.interactions.create({
+        const interaction = await ai.interactions.create({
           model: slotInfo.activeModel,
           store: false,
           system_instruction: systemPrompt,
           input: promptText,
           generation_config: buildInteractionGenerationConfig(
             resolvedThinkingLevel,
-            { temperature: 0.3 }
+            undefined,
+            slotInfo.activeModel
           ),
           response_format: {
             type: 'object',
             properties: {
-              editedText: {
+              translation: {
                 type: 'string',
-                description: 'Văn bản sau khi đã biên tập hoàn chỉnh.',
+                description:
+                  'Toàn bộ bản tiếng Việt sau biên tập theo đúng Chế độ A của Preset Biên tập.',
               },
             },
-            required: ['editedText'],
+            required: ['translation'],
             additionalProperties: false,
           },
         });
+        return safeParseInteractionJson<{
+          translation?: string;
+          editedText?: string;
+        }>(extractInteractionText(interaction), `Assist:${action}[${reqId}]`);
       },
       selectedModel,
       cleanFallbackModel,
@@ -638,13 +717,13 @@ ${surroundingContext ? `[NGỮ CẢNH XUNG QUANH]:\n${surroundingContext}` : ''}
       }
     );
 
-    const parsed = safeParseInteractionJson<{
-      editedText?: string;
-    }>(extractInteractionText(interaction), `Assist:${action}[${reqId}]`);
-
     const routeDurationMs = Date.now() - routeStartMs;
+    const finalEditedText = normalizeVietnameseText(
+      parsed.translation || parsed.editedText || selectedText
+    );
     return NextResponse.json({
-      resultText: normalizeVietnameseText(parsed.editedText || selectedText),
+      translation: finalEditedText,
+      resultText: finalEditedText,
       modelUsed,
       thinkingLevelUsed: resolvedThinkingLevel,
       didFallback,

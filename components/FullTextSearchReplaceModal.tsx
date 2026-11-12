@@ -423,7 +423,7 @@ export default function FullTextSearchReplaceModal({
                     <span className="text-xs font-bold text-[#1C1917]">
                       {res.titleDisplay}
                     </span>
-                    <span className="rounded-full bg-[#8C2D19]/10 px-2 py-0.5 font-mono text-[10px] font-bold text-[#8C2D19]">
+                    <span className="rounded-md bg-[#8C2D19]/10 px-2 py-0.5 font-mono text-[10px] font-bold text-[#8C2D19]">
                       {res.matchCount} kết quả
                     </span>
                   </div>

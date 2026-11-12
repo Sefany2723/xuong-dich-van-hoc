@@ -61,25 +61,25 @@ const LEVEL_STYLES: Record<
   }
 > = {
   error: {
-    rowBg: 'bg-red-950/45 hover:bg-red-950/70 border-l-2 border-l-red-500',
+    rowBg: 'bg-red-950/45 hover:bg-red-950/70',
     textColor: 'text-red-200',
     badgeBg: 'bg-red-600/30 text-red-300 border border-red-500/50',
     label: 'ERROR',
   },
   warn: {
-    rowBg: 'bg-amber-950/35 hover:bg-amber-950/55 border-l-2 border-l-amber-400',
+    rowBg: 'bg-amber-950/35 hover:bg-amber-950/55',
     textColor: 'text-amber-100',
     badgeBg: 'bg-amber-500/25 text-amber-300 border border-amber-500/40',
     label: 'WARN',
   },
   info: {
-    rowBg: 'hover:bg-zinc-800/70 border-l-2 border-l-transparent',
+    rowBg: 'hover:bg-zinc-800/70',
     textColor: 'text-zinc-200',
     badgeBg: 'bg-sky-500/20 text-sky-300 border border-sky-500/30',
     label: 'INFO',
   },
   debug: {
-    rowBg: 'hover:bg-zinc-800/50 border-l-2 border-l-purple-500/40 opacity-90',
+    rowBg: 'hover:bg-zinc-800/50 opacity-90',
     textColor: 'text-zinc-300',
     badgeBg: 'bg-purple-500/20 text-purple-300 border border-purple-500/30',
     label: 'TRACE',

@@ -2940,6 +2940,28 @@ export default function MacHuongCacStudioPage() {
       ? filteredAndSortedChapters[activeIndexInFiltered + 1]
       : null;
 
+  // Global keyboard shortcuts: Ctrl/Cmd + S (Save active chapter), Alt + ArrowLeft / ArrowRight (Prev/Next chapter)
+  useEffect(() => {
+    const handleWorkspaceShortcuts = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        void handleSaveEditorChanges();
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowLeft') {
+        if (prevChapter) {
+          e.preventDefault();
+          setActiveChapterId(prevChapter.id);
+        }
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowRight') {
+        if (nextChapter) {
+          e.preventDefault();
+          setActiveChapterId(nextChapter.id);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleWorkspaceShortcuts);
+    return () => window.removeEventListener('keydown', handleWorkspaceShortcuts);
+  }, [handleSaveEditorChanges, prevChapter, nextChapter]);
+
   // Windowed / Searchable list for Header Chapter Dropdown (instantaneous even on 3,000+ chapters)
   const dropdownChapterSlice = useMemo(() => {
     const q = chapterDropdownQuery.trim().toLowerCase();
@@ -3431,13 +3453,13 @@ export default function MacHuongCacStudioPage() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-[#FBF8F1] text-[#1C1917]">
-      {/* 1. TOP BAR CONTRACT (52px height, 3 clean zones) */}
-      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-[#E5DEC9] bg-[#F3EFE6] px-3 select-none">
+      {/* 1. TOP BAR CONTRACT (52px height, 3 clean zones, zero horizontal clipping) */}
+      <header className="flex h-[52px] shrink-0 items-center justify-between gap-2 border-b border-[#E5DEC9] bg-[#F3EFE6] px-2.5 select-none">
         {/* Left Zone: Sidebar Toggle + Brand + Novel Switcher */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="rounded-lg p-1.5 text-[#605A52] hover:bg-[#E5DEC9]/60 hover:text-[#1C1917]"
+            className="rounded-md p-1.5 text-[#605A52] hover:bg-[#E5DEC9]/60 hover:text-[#1C1917]"
             title={sidebarOpen ? 'Thu gọn danh sách chương' : 'Mở danh sách chương'}
           >
             {sidebarOpen ? (
@@ -3447,11 +3469,11 @@ export default function MacHuongCacStudioPage() {
             )}
           </button>
 
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1.5">
             <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[#8C2D19] font-serif text-xs font-bold text-white shadow-2xs">
               墨
             </span>
-            <span className="hidden whitespace-nowrap font-serif text-sm font-bold tracking-tight text-[#1C1917] sm:inline">
+            <span className="hidden whitespace-nowrap font-serif text-sm font-bold tracking-tight text-[#1C1917] 2xl:inline">
               Mặc Hương Các
             </span>
           </div>
@@ -3459,11 +3481,11 @@ export default function MacHuongCacStudioPage() {
           <div className="h-4 w-[1px] shrink-0 bg-[#E5DEC9]" />
 
           {/* Novel Library Button + Quick Switcher */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1">
             <button
               type="button"
               onClick={handleOpenLibraryModal}
-              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#8C2D19]/35 bg-[#8C2D19]/10 px-2.5 py-1.5 text-xs font-bold text-[#8C2D19] transition hover:bg-[#8C2D19] hover:text-white"
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-[#8C2D19]/35 bg-[#8C2D19]/10 px-2 py-1 text-xs font-bold text-[#8C2D19] transition hover:bg-[#8C2D19] hover:text-white"
               title={`Mở Thư Viện & Bảng Điều Khiển Tiến Độ Toàn Thư Viện — ${novels.length} bộ truyện · Đã dịch ${libraryGlobalStats.totalTranslated}/${libraryGlobalStats.totalChapters} chương (${libraryGlobalStats.pct}%) · Đã duyệt ${libraryGlobalStats.totalEdited} chương`}
             >
               <Library className="h-3.5 w-3.5" />
@@ -3479,7 +3501,7 @@ export default function MacHuongCacStudioPage() {
                 if (e.target.value) handleSelectNovel(e.target.value);
               }}
               disabled={novels.length === 0}
-              className="max-w-[170px] truncate rounded-lg border border-[#E5DEC9] bg-[#FBF8F1] px-2.5 py-1.5 text-xs font-semibold text-[#1C1917] focus:border-[#8C2D19] focus:outline-hidden disabled:opacity-60"
+              className="w-[125px] shrink-0 truncate rounded-md border border-[#E5DEC9] bg-[#FBF8F1] px-2 py-1 text-xs font-semibold text-[#1C1917] focus:border-[#8C2D19] focus:outline-hidden disabled:opacity-60 2xl:w-[165px]"
               title="Chuyển nhanh giữa các bộ truyện trong Thư viện"
             >
               {novels.length === 0 ? (
@@ -3497,7 +3519,7 @@ export default function MacHuongCacStudioPage() {
             <button
               type="button"
               onClick={() => setIsNewNovelModalOpen(true)}
-              className="shrink-0 rounded-lg border border-[#E5DEC9] bg-[#FBF8F1] p-1.5 text-[#605A52] hover:bg-[#E5DEC9]/60 hover:text-[#1C1917]"
+              className="shrink-0 rounded-md border border-[#E5DEC9] bg-[#FBF8F1] p-1 text-[#605A52] hover:bg-[#E5DEC9]/60 hover:text-[#1C1917]"
               title="Tạo nhanh dự án truyện mới"
             >
               <Plus className="h-3.5 w-3.5" />
@@ -3506,10 +3528,10 @@ export default function MacHuongCacStudioPage() {
         </div>
 
         {/* Center Zone: Unified 2-Mode Workspace Switcher */}
-        <div className="flex shrink-0 items-center rounded-lg border border-[#E5DEC9] bg-[#FBF8F1] p-0.5">
+        <div className="flex shrink-0 items-center rounded-md border border-[#E5DEC9] bg-[#FBF8F1] p-0.5">
           <button
             onClick={() => setWorkspaceMode('editor')}
-            className={`flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-xs font-semibold transition ${
+            className={`flex items-center gap-1 whitespace-nowrap rounded-xs px-2.5 py-1 text-xs font-semibold transition ${
               workspaceMode === 'editor'
                 ? 'bg-[#8C2D19] text-white shadow-2xs'
                 : 'text-[#605A52] hover:text-[#1C1917]'
@@ -3520,7 +3542,7 @@ export default function MacHuongCacStudioPage() {
           </button>
           <button
             onClick={() => setWorkspaceMode('reader')}
-            className={`flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-xs font-semibold transition ${
+            className={`flex items-center gap-1 whitespace-nowrap rounded-xs px-2.5 py-1 text-xs font-semibold transition ${
               workspaceMode === 'reader'
                 ? 'bg-[#8C2D19] text-white shadow-2xs'
                 : 'text-[#605A52] hover:text-[#1C1917]'
@@ -3532,10 +3554,10 @@ export default function MacHuongCacStudioPage() {
         </div>
 
         {/* Right Zone: Import, Presets/Model (incl. Glossary), Reader Appearance, Terminal, Guide, Export/Backup */}
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1">
           <button
             onClick={() => setIsImportModalOpen(true)}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5DEC9] bg-[#FBF8F1] px-2.5 py-1.5 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-[#E5DEC9] bg-[#FBF8F1] px-2 py-1 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
           >
             <FolderUp className="h-3.5 w-3.5 text-[#8C2D19]" />
             <span className="hidden md:inline">Nhập Chương</span>
@@ -3546,23 +3568,26 @@ export default function MacHuongCacStudioPage() {
               setInstructionsModalTab('instructions');
               setIsInstructionsModalOpen(true);
             }}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5DEC9] bg-[#FBF8F1] px-2.5 py-1.5 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-[#E5DEC9] bg-[#FBF8F1] px-2 py-1 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
             title={`Quản lý Preset Dịch, Preset Biên Tập AI, Từ Điển Glossary & Chọn Model (${modelConfig.selectedModel} • Thinking: ${modelConfig.thinkingLevel || DEFAULT_THINKING_LEVEL})`}
           >
             <Sliders className="h-3.5 w-3.5 text-[#8C2D19]" />
             <span className="hidden lg:inline">Preset &amp; Model</span>
-            <span className="rounded bg-[#8C2D19]/12 px-1.5 py-0.2 font-mono text-[10px] font-bold text-[#8C2D19]">
-              {modelConfig.selectedModel}
+            <span className="rounded-xs bg-[#8C2D19]/12 px-1.5 py-0.2 font-mono text-[10px] font-bold text-[#8C2D19]">
+              {modelConfig.selectedModel
+                .replace(/^models\//, '')
+                .replace(/^gemini-/, '')
+                .replace(/-preview$/, '')}
             </span>
             <span
-              className="rounded border border-[#8C2D19]/30 bg-white px-1.5 py-0.2 font-mono text-[10px] font-bold text-[#8C2D19]"
+              className="rounded-xs border border-[#8C2D19]/30 bg-white px-1 py-0.2 font-mono text-[10px] font-bold text-[#8C2D19]"
               title={`Mức suy luận AI hiện tại: ${modelConfig.thinkingLevel || DEFAULT_THINKING_LEVEL} (Mặc định: high)`}
             >
               {(modelConfig.thinkingLevel || DEFAULT_THINKING_LEVEL).toUpperCase()}
             </span>
             {shouldSendGlossary && (
               <span
-                className="rounded bg-[#1E6F50]/15 px-1.5 py-0.2 font-mono text-[10px] font-bold text-[#1E6F50]"
+                className="rounded-xs bg-[#1E6F50]/15 px-1 py-0.2 font-mono text-[10px] font-bold text-[#1E6F50]"
                 title="Đang BẬT gửi kèm bảng Glossary"
               >
                 Gloss
@@ -3572,7 +3597,7 @@ export default function MacHuongCacStudioPage() {
 
           <button
             onClick={() => setIsAppearanceModalOpen(true)}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5DEC9] bg-[#FBF8F1] px-2.5 py-1.5 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-[#E5DEC9] bg-[#FBF8F1] px-2 py-1 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
             title="Màu nền HEX/RGB, Phông chữ & Căn đều Justify"
           >
             <Palette className="h-3.5 w-3.5 text-[#8C2D19]" />
@@ -3581,7 +3606,7 @@ export default function MacHuongCacStudioPage() {
 
           <button
             onClick={() => setIsTerminalOpen(!isTerminalOpen)}
-            className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
+            className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border px-2 py-1 text-xs font-semibold transition ${
               terminalCounts.errors > 0
                 ? 'border-red-300 bg-red-50 text-red-800 hover:bg-red-100'
                 : isTerminalOpen
@@ -3593,11 +3618,11 @@ export default function MacHuongCacStudioPage() {
             <Terminal className="h-3.5 w-3.5 text-[#8C2D19]" />
             <span className="hidden sm:inline">Terminal</span>
             {terminalCounts.errors > 0 ? (
-              <span className="rounded bg-red-600 px-1.5 py-0.2 font-mono text-[10px] font-bold text-white">
+              <span className="rounded-xs bg-red-600 px-1 py-0.2 font-mono text-[10px] font-bold text-white">
                 {terminalCounts.errors} lỗi
               </span>
             ) : (
-              <span className="rounded bg-[#8C2D19]/12 px-1.5 py-0.2 font-mono text-[10px] font-bold text-[#8C2D19]">
+              <span className="rounded-xs bg-[#8C2D19]/12 px-1 py-0.2 font-mono text-[10px] font-bold text-[#8C2D19]">
                 {terminalCounts.total}
               </span>
             )}
@@ -3605,16 +3630,16 @@ export default function MacHuongCacStudioPage() {
 
           <button
             onClick={() => setIsUserGuideOpen(true)}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5DEC9] bg-[#FBF8F1] px-2.5 py-1.5 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-[#E5DEC9] bg-[#FBF8F1] px-2 py-1 text-xs font-semibold text-[#1C1917] hover:bg-[#E5DEC9]/60"
             title="Mở Cẩm Nang Hướng Dẫn Sử Dụng chi tiết & Tải tài liệu (.md)"
           >
             <HelpCircle className="h-3.5 w-3.5 text-[#8C2D19]" />
-            <span className="hidden xl:inline">Hướng Dẫn</span>
+            <span className="hidden lg:inline">Hướng Dẫn</span>
           </button>
 
           <button
             onClick={() => setIsExportModalOpen(true)}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#8C2D19] px-3 py-1.5 text-xs font-semibold text-white shadow-2xs hover:bg-[#722211]"
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-[#8C2D19] px-2.5 py-1 text-xs font-semibold text-white shadow-2xs hover:bg-[#722211]"
           >
             <Download className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">EPUB &amp; Backup</span>
@@ -3837,7 +3862,7 @@ export default function MacHuongCacStudioPage() {
                     onClick={() => setActiveChapterId(ch.id)}
                     className={`group flex cursor-pointer items-start gap-2.5 px-3 py-2.5 transition select-none ${
                       isActive
-                        ? 'bg-[#8C2D19]/12 border-l-4 border-l-[#8C2D19]'
+                        ? 'bg-[#8C2D19]/12 ring-1 ring-inset ring-[#8C2D19]/35'
                         : 'hover:bg-[#E5DEC9]/40'
                     }`}
                   >

@@ -8,7 +8,7 @@ import {
   materializeBlocksToChapter,
   splitRawIntoBlocks,
 } from './block-engine';
-import { GlossaryEntry } from './types';
+import { Chapter, GlossaryEntry } from './types';
 import {
   buildInteractionGenerationConfig,
   extractInteractionText,
@@ -19,6 +19,7 @@ import {
   DEFAULT_INSTRUCTION_ID,
   DEFAULT_INSTRUCTION_PROFILES,
 } from './seed-data';
+import { scanChapterQA } from './qa-scanner';
 
 test('safeFetchJson recovers when res.text() throws Failed to fetch mid-stream during heartbeat streaming', async () => {
   const originalFetch = globalThis.fetch;
@@ -288,5 +289,49 @@ test('Presets v1.14.1 and v1.14.0 match official Markdown reference files verbat
     'Câu thơ thứ nhất\nCâu thơ thứ hai\n\n【Cảnh giới: Trúc Cơ】\n【Linh lực: 100】'
   );
 });
+
+test('scanChapterQA ignores unaccented Vietnamese homographs (in, then, than, the, to, do, so, long, trang) while flagging real English leaks and documentation is synced', () => {
+  const cleanChapter: Chapter = {
+    id: 'ch-test-1',
+    novelId: 'novel-default-1',
+    orderPrefix: '0001',
+    chapterNumber: 1,
+    titleRaw: '第1章 赤心',
+    titleTranslated: 'Chương 1: Xích Tâm',
+    rawContent: '第一段内容很长，姜望看着远方的山脉。\n\n第二段内容也很长，左光烈挥剑斩断天际。',
+    translatedContent:
+      'Đoạn thứ nhất in sâu trong tâm trí Khương Vọng, ánh trăng long lanh chiếu rọi.\n\nĐoạn thứ hai Tả Quang Liệt vung kiếm, uy thế kinh thiên động địa.',
+    status: 'translated',
+    updatedAt: Date.now(),
+  };
+
+  const cleanReport = scanChapterQA(cleanChapter);
+  assert.equal(cleanReport.leakedEnglishCount, 0);
+  assert.equal(cleanReport.hasIssues, false);
+
+  const leakChapter: Chapter = {
+    ...cleanChapter,
+    translatedContent:
+      'Đoạn thứ nhất Khương Vọng nhìn về phía xa, however hắn vẫn không lùi bước.\n\nĐoạn thứ hai Tả Quang Liệt vung kiếm.',
+  };
+  const leakReport = scanChapterQA(leakChapter);
+  assert.ok(leakReport.leakedEnglishCount > 0);
+  assert.ok(
+    leakReport.issues.some(
+      (i) => i.type === 'english_leak' && i.match.toLowerCase() === 'however'
+    )
+  );
+
+  // Verify HUONG_DAN_SU_DUNG.md documents Xích Tâm Tuần Thiên, Preset 1.14.1, 8 QA criteria, and 3 highlight colors
+  const docContent = fs.readFileSync(
+    path.join(process.cwd(), 'HUONG_DAN_SU_DUNG.md'),
+    'utf8'
+  );
+  assert.ok(docContent.includes('Xích Tâm Tuần Thiên'));
+  assert.ok(docContent.includes('1.14.1'));
+  assert.ok(docContent.includes('VIETNAMESE_HOMOGRAPH_WORDS'));
+  assert.ok(docContent.includes('Xanh Thanh Thiên'));
+});
+
 
 

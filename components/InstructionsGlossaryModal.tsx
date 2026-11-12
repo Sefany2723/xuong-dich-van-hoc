@@ -1911,10 +1911,10 @@ export default function InstructionsGlossaryModal({
             </button>
           </div>
 
-          {/* Global Glossary Send Toggle Pill */}
+          {/* Global Glossary Send Toggle */}
           <button
             onClick={() => onToggleIncludeGlossaryForNovel(!includeGlossaryForNovel)}
-            className={`my-1.5 inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold transition ${
+            className={`my-1.5 inline-flex items-center gap-1.5 rounded-md border px-3 py-1 text-xs font-bold transition ${
               includeGlossaryForNovel
                 ? 'border-[#1E6F50] bg-[#1E6F50]/15 text-[#1E6F50]'
                 : 'border-[#C9B99A] bg-white text-[#605A52]'
@@ -4005,7 +4005,7 @@ export default function InstructionsGlossaryModal({
                             <p className="mt-1 text-[11px] text-[#605A52]">{ep.detail}</p>
                           </div>
                           <span
-                            className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] font-bold ${
+                            className={`shrink-0 rounded-md px-2 py-0.5 font-mono text-[10px] font-bold ${
                               ep.status === 'ok'
                                 ? 'bg-[#1E6F50]/15 text-[#1E6F50]'
                                 : ep.status === 'warning'
